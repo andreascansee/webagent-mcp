@@ -1,10 +1,20 @@
 # MCP Client & Server Demo
 
-This project demonstrates a minimal but functional implementation of an **MCP (Model Context Protocol)** system, combining:
+This project is based on the [DeepLearning.AI course on the Model Context Protocol (MCP)](https://learn.deeplearning.ai/courses/mcp-build-rich-context-ai-apps-with-anthropic), which walks through building a low-level MCP setup using the official `mcp` libraries — including a tool server and a client that can autonomously invoke tools via an LLM.
 
-- ✅ a **local MCP server** exposing tools (like web search & page fetching)
-- 🤖 a **client agent** powered by a local LLM (e.g. via Ollama)
-- 🌐 optional **debug UI** using the [MCP Inspector](https://www.npmjs.com/package/@modelcontextprotocol/inspector)
+While the course code already exposes core MCP mechanics, I wanted to fully internalize and improve the architecture.  
+To do so, I made the following changes:
+
+- **Switched from Anthropic to Ollama**  
+  I replaced the Anthropic API with a local Ollama-based client so I can run open models like `qwen2.5` or `llama3` — offline, locally, and for free.
+
+- **Refactored the code for clarity and maintainability**  
+  The client logic is now more modular, testable, and easier to understand. I extracted the core agent loop into a clean `MCPAgent` class.
+
+- **Built a web-focused tool setup instead of arXiv**  
+  Instead of scientific search tools, I use DuckDuckGo search + HTML page parsing — turning the agent into a basic autonomous web researcher.
+
+These changes helped me better understand how MCP works under the hood — from tool discovery and routing to result injection and multi-turn reasoning.
 
 ---
 

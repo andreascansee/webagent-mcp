@@ -1,6 +1,8 @@
-import subprocess
+from contextlib import AsyncExitStack
+from typing import List, Dict
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from mcp_client.types import ToolDefinition
 from mcp_client.llm.ollama_client import OllamaClient
 from mcp_client.llm.prompts import SYSTEM_PROMPT
 from mcp_client.llm.tool_helpers import (
@@ -13,71 +15,71 @@ class MCPAgent:
     The main agent class for interacting with the MCP server and the local LLM.
     """
 
-    MAX_LOOP_ITERATIONS = 5
+    MAX_LOOP_ITERATIONS = 5  # Prevent infinite loops if the LLM repeatedly calls tools
 
     def __init__(self):
-        self.mcp_session: ClientSession | None = None
-        self.llm_client = OllamaClient()
-        self.available_llm_tools: list = []  # All tools registered from the MCP server
-        self.messages = []  # The message history sent to the LLM
+        self.sessions: List[ClientSession] = []  # All active tool server sessions
+        self.exit_stack = AsyncExitStack()       # Ensures clean async resource teardown
+        self.llm_client = OllamaClient()         # Handles interaction with the local LLM
+        self.available_llm_tools: List[ToolDefinition] = []  # Tool metadata passed to the LLM
+        self.tool_to_session: Dict[str, ClientSession] = {}  # Maps tool names to MCP sessions
+        self.messages = []  # Complete message history sent to the LLM
 
     async def handle_tool_call(self, tool_name: str, tool_args: dict, tool_use_id: str) -> str:
         """
-        Executes the given MCP tool and returns the result as a plain string.
+        Executes a single MCP tool and returns its output as plain string.
         """
         print(f"Calling MCP tool '{tool_name}'...")
-        tool_response = await self.mcp_session.call_tool(tool_name, arguments=tool_args)
+        session = self.tool_to_session.get(tool_name)
+        if not session:
+            raise ValueError(f"No session found for tool: {tool_name}")
 
+        tool_response = await session.call_tool(tool_name, arguments=tool_args)
         return extract_text_from_tool_result(tool_response.content)
 
-    async def connect_to_mcp_server(self, server_command: str, server_args: list):
+    async def connect_to_server(self, server_name: str, server_config: dict) -> None:
         """
-        Starts the MCP server via subprocess and establishes a session.
+        Launches and connects to an MCP server via stdio transport.
+        Registers all available tools for that session.
         """
-        print("\n--- Connecting to MCP Server ---")
-        server_params = StdioServerParameters(
-            command=server_command,
-            args=server_args,
-            env=None,
-            stderr=subprocess.PIPE
-        )
+        try:
+            server_params = StdioServerParameters(**server_config)
 
-        async with stdio_client(server_params) as (read_stream, write_stream):
-            print(f"Attempting to connect to MCP server: Command='{server_command}', Args={server_args}")
-            print("Stdio client context established. Server process should be running.")
+            # Automatically close connections when the agent shuts down
+            stdio_transport = await self.exit_stack.enter_async_context(
+                stdio_client(server_params)
+            )
+            read, write = stdio_transport
 
-            async with ClientSession(read_stream, write_stream) as session:
-                self.mcp_session = session
-                print("MCP ClientSession created. Initializing connection...")
-                await session.initialize()
-                print("MCP connection initialized successfully!")
+            session = await self.exit_stack.enter_async_context(
+                ClientSession(read, write)
+            )
+            await session.initialize()
+            self.sessions.append(session)
 
-                # Get all available tools from the server
-                response = await session.list_tools()
-                mcp_tools = response.tools
+            # Fetch and register all tools from this server
+            response = await session.list_tools()
+            tools = response.tools
+            print(f"\nConnected to {server_name} with tools:", [t.name for t in tools])
 
-                self.available_llm_tools = [{
+            for tool in tools:
+                self.tool_to_session[tool.name] = session
+                self.available_llm_tools.append({
                     "name": tool.name,
                     "description": tool.description,
                     "input_schema": tool.inputSchema
-                } for tool in mcp_tools]
+                })
 
-                print(f"Connected to MCP server with tools: {[tool.name for tool in mcp_tools]}")
-                print(f"Prepared {len(self.available_llm_tools)} tools for LLM interaction.")
-
-                # Add the system prompt to initialize the chat context
-                self.messages.append({"role": "system", "content": SYSTEM_PROMPT})
-
-                print("\n--- Agent initialized and ready for chat loop ---")
-                await self.chat_loop()
-
-            print("Exiting ClientSession context. Server will shut down.")
+        except Exception as e:
+            print(f"Failed to connect to {server_name}: {e}")
 
     async def process_query(self, query: str):
         """
-        Handles a single user query by interacting with the LLM
-        and executing any tool calls it may request.
+        Sends a user query to the LLM and handles any resulting tool calls.
         """
+        if not self.messages:
+            self.messages.append({"role": "system", "content": SYSTEM_PROMPT})  # Inject initial system prompt
+
         print(f"\nProcessing query: {query}")
         self.messages.append({"role": "user", "content": query})
 
@@ -92,6 +94,7 @@ class MCPAgent:
                     tools=self.available_llm_tools
                 )
 
+                # Handle malformed responses
                 if 'content' not in ollama_response or not ollama_response['content']:
                     print("\nLLM returned no content or an empty response.")
                     self.messages.append({"role": "assistant", "content": "[No reply]"})
@@ -100,6 +103,7 @@ class MCPAgent:
                 assistant_message_content = []
                 tool_calls_made_this_turn = []
 
+                # Process each returned block: text or tool call
                 for block in ollama_response['content']:
                     if block['type'] == 'text':
                         print("\nLLM says:")
@@ -113,20 +117,19 @@ class MCPAgent:
                         assistant_message_content.append(block)
                         tool_calls_made_this_turn.append((tool_name, tool_args, tool_use_id))
 
-                # Add assistant reply (text + tool_use metadata) to message history
+                # Add assistant response to message history (text + tool metadata)
                 text_parts = [b['text'] for b in assistant_message_content if b['type'] == 'text']
                 final_text = "\n".join(text_parts).strip() or "[No response]"
                 self.messages.append({"role": "assistant", "content": final_text})
 
+                # Execute any requested tools and inject their result as synthetic user messages
                 if tool_calls_made_this_turn:
                     for tool_name, tool_args, tool_use_id in tool_calls_made_this_turn:
                         result = await self.handle_tool_call(tool_name, tool_args, tool_use_id)
                         print(f"Tool '{tool_name}' returned: {result[:200]}...")
-
                         self.messages.append(format_tool_result_as_user_message(tool_name, result))
-
                 else:
-                    break  # No tools requested, LLM has responded with final answer
+                    break  # No tool calls → final answer received
 
             except Exception as e:
                 print(f"\n[Error in process_query] An error occurred during LLM interaction or tool execution: {e}")
@@ -137,7 +140,7 @@ class MCPAgent:
 
     async def chat_loop(self):
         """
-        Handles the interactive chat loop in the console.
+        Simple interactive console chat loop.
         """
         print("Chat loop started. Type 'quit' to exit.")
         while True:
@@ -149,3 +152,9 @@ class MCPAgent:
             except Exception as e:
                 print(f"\nError in chat loop: {e}")
         print("Chat loop finished.")
+
+    async def cleanup(self):
+        """
+        Cleanly shut down all sessions using the exit stack.
+        """
+        await self.exit_stack.aclose()
