@@ -3,6 +3,10 @@
     "default": {
       "command": "python",
       "args": ["-m", "mcp_server"]
+    },
+    "calculator": {
+      "command": "python",
+      "args": ["-m", "mcp_server_calculator"]
     }
   }
 }

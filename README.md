@@ -135,3 +135,84 @@ If the LLM triggers a tool call, it will appear under:
 ```python
 response["message"]["tool_calls"]
 ```
+
+## 🛠️ Adding New Tools
+
+This project supports **multiple MCP tool servers**, and you can connect as many as you like. Each server provides one or more tools that the LLM can invoke autonomously.
+
+There are **two main types of tool servers** you can add:
+
+### 1. Tools You Code Yourself (Inline or from GitHub)
+
+You can add your own tools in Python, like the existing ones under `mcp_server/tools/`.  
+
+Or you can reuse tool servers published by others — for example, from the official MCP server collection:
+
+→ https://github.com/modelcontextprotocol/servers
+
+Then you can run one of the provided servers (e.g. `arxiv-server`) by configuring it in `server_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "default": {
+      "command": "python",
+      "args": ["-m", "mcp_server"]
+    },
+    "arxiv": {
+      "command": "python",
+      "args": ["external/mcp-servers/arxiv-server/main.py"]
+    }
+  }
+}
+```
+
+> Tip: You can clone or copy individual tool server folders manually to keep your project lightweight.
+
+---
+
+### 2. Tools Installed via `pip` (Prebuilt Servers)
+
+Some third-party servers are published as installable packages.
+
+Example: the calculator tool server  
+→ https://github.com/githejie/mcp-server-calculator
+
+Install it via pip:
+
+```bash
+pip install mcp-server-calculator
+```
+
+Then add it to your `server_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "default": {
+      "command": "python",
+      "args": ["-m", "mcp_server"]
+    },
+    "calculator": {
+      "command": "python",
+      "args": ["-m", "mcp_server_calculator"]
+    }
+  }
+}
+```
+
+---
+
+### 🔧 Adjusting the Prompt (Recommended)
+
+To make sure your LLM knows when and how to use your new tool(s), you should also update the [system prompt](./mcp_client/llm/prompts.py) in `mcp_client/llm/prompts.py`.
+
+
+Be clear and specific about:
+
+- What the tool does  
+- When to use it  
+- What kind of input is valid  
+- Whether it replaces or complements other tools  
+
+This improves reasoning and tool selection dramatically — especially with local models like Qwen or LLaMA 3.
